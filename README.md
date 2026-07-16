@@ -192,11 +192,41 @@ below for details.
      Set the timeout for HTTP-based metadata exchange. Default is 2.0 seconds.
 
  * `--source-port PORT`
+
      Set the source port for outgoing multicast messages, so that replies will
      use this as the destination port.
      This is useful for firewalls that do not detect incoming unicast replies
      to a multicast as part of the flow, so the port needs to be fixed in order
      to be allowed manually.
+
+ * `--relay-peer HOST[:PORT]`
+
+     Forward local IPv4 WS-Discovery multicast packets to a remote wsdd relay
+     peer using unicast UDP. This option can be specified multiple times. If
+     the port is omitted, `3703` is used. Relay mode is intended for L3 or mesh
+     networks that do not carry multicast, e.g. a routed VPN or overlay.
+
+ * `--relay-listen-port PORT`
+
+     UDP port used to receive relay packets from peers. The default is `3703`.
+
+ * `--relay-ttl COUNT`
+
+     Maximum number of relay hops allowed for tunneled packets. The default is
+     `4`.
+
+ * `--relay-secret SECRET`
+
+     Shared secret used to authenticate relay packets with HMAC-SHA256. All
+     peers that should exchange packets must use the same secret.
+
+ * `--relay-xaddr-map FROM=TO`
+
+     Rewrite matching WS-Discovery `XAddrs` URLs in relayed packets. This is
+     useful for ONVIF deployments where cameras advertise LAN-only addresses
+     but clients on the other side of the mesh need to connect through a routed
+     or proxied address. The option can be specified multiple times and only
+     rewrites URL values that start with `FROM`.
 
  * `-s`, `--shortlog`
 
@@ -315,6 +345,166 @@ command line arguments (see above). Upon startup a _Hello_ message is sent.
 When wsdd terminates due to a SIGTERM signal or keyboard interrupt, a graceful
 shutdown is performed by sending a _Bye_ message. I/O multiplexing is used to
 handle network traffic of the different sockets within a single process.
+
+## Relay Mode for Routed or Mesh Networks
+
+WS-Discovery and ONVIF discovery use multicast UDP on `239.255.255.250:3702`.
+This multicast traffic is normally limited to the local L2 segment. Increasing
+`--hoplimit` only helps when the network actually routes multicast; it does not
+make multicast work across overlays that only route unicast UDP.
+
+Relay mode bridges the discovery plane by capturing local IPv4 WS-Discovery
+multicast packets, encapsulating the original UDP payload in unicast UDP, and
+sending it to configured wsdd relay peers. A receiving peer rebroadcasts the
+payload as local multicast. Unicast discovery replies are forwarded back to the
+originating side and delivered to the original requester when the source
+address and port can be mapped.
+
+### When to use relay mode
+
+Use relay mode when:
+
+ * clients and devices are on different routed networks,
+ * the routed network is a unicast-only overlay, such as a mesh VPN,
+ * multicast routing, IGMP proxying, or L2 bridging is not available, and
+ * the only missing piece is the discovery traffic.
+
+Relay mode does not turn wsdd into a general ONVIF, HTTP, RTSP, or SMB proxy.
+After discovery, the client must still be able to connect to the discovered
+service address. If the device advertises an address that is not reachable from
+the other site, use `--relay-xaddr-map` together with a real routed address,
+NAT rule, reverse proxy, or application proxy.
+
+### Network layout
+
+In the examples below, Site A contains the client and Site B contains the
+ONVIF cameras. The Cloudflare mesh addresses are examples only.
+
+```
+Site A LAN:        192.168.1.0/24
+Site A relay LAN:  192.168.1.10
+Site A mesh IP:    100.96.0.10
+
+Site B LAN:        192.168.10.0/24
+Site B relay LAN:  192.168.10.10
+Site B mesh IP:    100.96.0.20
+Camera:            192.168.10.50
+
+Unicast relay UDP: 100.96.0.10:3703 <-> 100.96.0.20:3703
+Local discovery:   239.255.255.250:3702 on each LAN
+```
+
+Run one wsdd relay process on each side. Each relay must be connected to the
+local LAN that should send or receive multicast, and each relay must be able to
+send unicast UDP to the other relay over the routed or mesh network.
+
+### Firewall requirements
+
+Allow the normal local discovery traffic on each LAN:
+
+ * UDP `3702` to and from `239.255.255.250`
+ * UDP unicast replies from and to UDP `3702`
+
+Allow the relay traffic across the routed or mesh network:
+
+ * UDP `3703` from each configured relay peer to the other peer, or the port
+   provided with `--relay-listen-port`
+
+When `--relay-secret` is used, peers with the wrong secret are rejected, but
+firewall rules should still restrict relay UDP traffic to known peer addresses.
+
+### Example 1: bridge ONVIF discovery between two sites
+
+This is the simplest setup when the discovered camera address is already
+reachable from the client side, for example because the mesh routes
+`192.168.10.0/24` to Site B.
+
+```
+site-a$ wsdd -4 --no-host --interface eth0 \
+  --relay-peer 100.96.0.20:3703 --relay-listen-port 3703 \
+  --relay-secret 'shared-secret'
+
+site-b$ wsdd -4 --no-host --interface eth0 \
+  --relay-peer 100.96.0.10:3703 --relay-listen-port 3703 \
+  --relay-secret 'shared-secret'
+```
+
+What happens:
+
+ * a client on Site A sends an ONVIF/WS-Discovery Probe to
+   `239.255.255.250:3702`,
+ * the Site A relay forwards that payload to `100.96.0.20:3703`,
+ * the Site B relay rebroadcasts the payload as multicast on `eth0`,
+ * cameras on Site B answer the probe,
+ * the Site B relay forwards unicast discovery replies back to Site A, and
+ * the Site A relay delivers those replies to the original requester.
+
+### Example 2: bridge discovery and rewrite ONVIF XAddrs
+
+Some ONVIF cameras advertise local URLs such as
+`http://192.168.10.50/onvif/device_service`. If clients on Site A cannot route
+to `192.168.10.50`, discovery may succeed but the ONVIF connection will fail.
+In that case, rewrite advertised `XAddrs` values to an address that is
+reachable from Site A.
+
+For example, suppose Site B runs a reverse proxy on its mesh address
+`100.96.0.20:8080` that forwards requests to the camera LAN. Configure the Site
+B relay with an XAddrs mapping:
+
+```
+site-b$ wsdd -4 --no-host --interface eth0 \
+  --relay-peer 100.96.0.10:3703 --relay-listen-port 3703 \
+  --relay-secret 'shared-secret' \
+  --relay-xaddr-map http://192.168.10.=http://100.96.0.20:8080/camera/
+```
+
+With this rule, an advertised URL such as:
+
+```
+http://192.168.10.50/onvif/device_service
+```
+
+is rewritten in relayed discovery packets to:
+
+```
+http://100.96.0.20:8080/camera/50/onvif/device_service
+```
+
+The exact mapping depends on the reverse proxy or NAT design. The important
+point is that the rewritten URL must be valid from the requester side. wsdd
+does not create that proxy path; it only changes the discovery response to
+point at it.
+
+### Example 3: hub-and-spoke relay
+
+Multiple `--relay-peer` options can be used when one site should forward
+discovery packets to more than one remote site:
+
+```
+hub$ wsdd -4 --no-host --interface eth0 \
+  --relay-peer 100.96.0.20:3703 \
+  --relay-peer 100.96.0.30:3703 \
+  --relay-listen-port 3703 \
+  --relay-secret 'shared-secret'
+```
+
+Use `--relay-ttl` to limit how far packets can propagate in multi-hop designs.
+The default is `4`. Keep this value low unless a larger relay topology really
+needs it.
+
+### Operational tips
+
+ * Use `-4` because relay mode currently handles IPv4 WS-Discovery.
+ * Use `--interface` to bind wsdd to the LAN interface that should receive and
+   rebroadcast multicast. Avoid tunnel, bridge, Docker, and unrelated
+   interfaces.
+ * Use `--no-host` for a pure relay proxy that should not advertise the relay
+   machine itself as a WSD host.
+ * Use `-v` or `-vv` while testing to see relay activity and XAddrs rewrites.
+ * Use the same `--relay-secret` on all peers that should exchange relay
+   packets.
+ * Confirm that normal unicast connectivity to the final ONVIF/HTTP/RTSP
+   service works after discovery. Relay mode only moves discovery packets.
 
 # Known Issues
 

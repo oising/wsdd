@@ -61,6 +61,29 @@ This is useful for firewalls that do not detect incoming unicast replies
 to a multicast as part of the flow, so the port needs to be fixed in order
 to be allowed manually.
 .TP
+\fB\-\-relay-peer\ \fIHOST[:PORT]\fR
+Forward local IPv4 WS-Discovery multicast packets to a remote wsdd relay peer
+using unicast UDP. This option can be specified multiple times. If the port is
+omitted, 3703 is used. Relay mode is intended for L3 or mesh networks that do
+not carry multicast.
+.TP
+\fB\-\-relay-listen-port\ \fIPORT\fR
+UDP port used to receive relay packets from peers. The default is 3703.
+.TP
+\fB\-\-relay-ttl\ \fICOUNT\fR
+Maximum number of relay hops allowed for tunneled packets. The default is 4.
+.TP
+\fB\-\-relay-secret\ \fISECRET\fR
+Shared secret used to authenticate relay packets with HMAC-SHA256. All peers
+that should exchange packets must use the same secret.
+.TP
+\fB\-\-relay-xaddr-map\ \fIFROM=TO\fR
+Rewrite matching WS-Discovery XAddrs URLs in relayed packets. This is useful
+for ONVIF deployments where cameras advertise LAN-only addresses but clients on
+the other side of the mesh need to connect through a routed or proxied address.
+The option can be specified multiple times and only rewrites URL values that
+start with FROM.
+.TP
 \fB\-s\fR, \fB\-\-shortlog\fR
 Use a shorter logging format that only includes the level and message.
 This is useful in cases where the logging mechanism, like systemd on Linux,
@@ -259,3 +282,34 @@ response appears to detect a mismatch between the transport address in the
 \fIResolveMatch\fR message (which is the tunnel/bridge address) and the IP of the
 sending host/interface (LAN IP, e.g.). Subsequently, the wsdd host is ignored by
 Windows.
+
+.SS Relay Mode for Routed or Mesh Networks
+.PP
+WS-Discovery and ONVIF discovery use multicast UDP on 239.255.255.250:3702.
+This multicast traffic is normally limited to the local L2 segment. Increasing
+\fB\-\-hoplimit\fR only helps when the network actually routes multicast; it does
+not make multicast work across overlays that only route unicast UDP.
+.PP
+Relay mode bridges the discovery plane by capturing local IPv4 WS-Discovery
+multicast packets, encapsulating the original UDP payload in unicast UDP, and
+sending it to configured wsdd relay peers. A receiving peer rebroadcasts the
+payload as local multicast. Unicast discovery replies are forwarded back to the
+originating side and delivered to the original requester when the source address
+and port can be mapped.
+.PP
+Example with two pure relay proxies:
+.PP
+.nf
+site-a# wsdd -4 --no-host --interface eth0 \\
+  --relay-peer 100.96.0.20:3703 --relay-listen-port 3703 \\
+  --relay-secret shared-secret
+
+site-b# wsdd -4 --no-host --interface eth0 \\
+  --relay-peer 100.96.0.10:3703 --relay-listen-port 3703 \\
+  --relay-secret shared-secret
+.fi
+.PP
+For ONVIF cameras that advertise addresses not reachable from the other side of
+the mesh, add explicit XAddrs rewrite rules. The rewritten target must already
+route or proxy to the camera service. wsdd does not proxy ONVIF control or media
+traffic; it only rewrites discovery addresses when instructed.

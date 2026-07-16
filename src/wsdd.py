@@ -18,6 +18,10 @@ import asyncio
 import struct
 import argparse
 import uuid
+import json
+import base64
+import hmac
+import hashlib
 import time
 import random
 import logging
@@ -1025,6 +1029,414 @@ class WSDHost(WSDUDPMessageHandler):
         type(self).message_number += 1
 
 
+RelayPeer = Tuple[str, int]
+RelaySource = Dict[str, Union[str, int]]
+RelayEnvelope = Dict[str, Any]
+
+
+class WSDRelaySocketHandler(INetworkPacketHandler):
+
+    relay: 'WSDRelay'
+    mch: MulticastHandler
+    role: str
+
+    def __init__(self, relay: 'WSDRelay', mch: MulticastHandler, role: str) -> None:
+        self.relay = relay
+        self.mch = mch
+        self.role = role
+
+    def handle_packet(self, msg: str, udp_src_address: UdpAddress) -> None:
+        if self.role == 'multicast':
+            self.relay.handle_local_multicast(self.mch, msg, udp_src_address)
+        elif self.role == 'reply':
+            self.relay.handle_local_unicast_reply(self.mch, msg, udp_src_address)
+
+
+class WSDRelay:
+    """
+    Relay WS-Discovery multicast over an explicit unicast UDP tunnel.
+    """
+
+    instance: ClassVar[Optional['WSDRelay']] = None
+
+    RELAY_MAGIC: ClassVar[str] = 'wsdd-relay'
+    RELAY_VERSION: ClassVar[int] = 1
+    DEFAULT_PORT: ClassVar[int] = 3703
+    MAX_RECENT_PACKETS: ClassVar[int] = 1024
+    MAX_PENDING_ROUTES: ClassVar[int] = 1024
+    PENDING_ROUTE_TIMEOUT: ClassVar[int] = 30
+
+    aio_loop: asyncio.AbstractEventLoop
+    peers: List[RelayPeer]
+    xaddr_maps: List[Tuple[str, str]]
+    secret: Optional[bytes]
+    relay_socket: socket.socket
+    relay_id: str
+    mchs: List[MulticastHandler]
+    multicast_handlers: Dict[MulticastHandler, WSDRelaySocketHandler]
+    reply_handlers: Dict[Tuple[MulticastHandler, socket.socket], WSDRelaySocketHandler]
+    recent_packet_ids: Deque[str]
+    recent_packet_id_set: Set[str]
+    suppressed_message_ids: Deque[str]
+    suppressed_message_id_set: Set[str]
+    pending_routes: Dict[str, Tuple[float, RelayPeer, RelaySource]]
+
+    def __init__(self, aio_loop: asyncio.AbstractEventLoop) -> None:
+        if WSDRelay.instance is not None:
+            raise RuntimeError('Instance of WSDRelay already created')
+
+        WSDRelay.instance = self
+        self.aio_loop = aio_loop
+        self.peers = self.parse_peers(args.relay_peer)
+        self.xaddr_maps = self.parse_xaddr_maps(args.relay_xaddr_map)
+        self.secret = args.relay_secret.encode('utf-8') if args.relay_secret else None
+        self.relay_id = uuid.uuid4().hex
+        self.mchs = []
+        self.multicast_handlers = {}
+        self.reply_handlers = {}
+        self.recent_packet_ids = collections.deque([], self.MAX_RECENT_PACKETS)
+        self.recent_packet_id_set = set()
+        self.suppressed_message_ids = collections.deque([], WSD_MAX_KNOWN_MESSAGES * 4)
+        self.suppressed_message_id_set = set()
+        self.pending_routes = {}
+
+        self.relay_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.relay_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.relay_socket.bind(('', args.relay_listen_port))
+        self.aio_loop.add_reader(self.relay_socket.fileno(), self.read_relay_socket)
+
+        logger.info('relay enabled on UDP port {} with {} peer(s)'.format(args.relay_listen_port, len(self.peers)))
+
+    @staticmethod
+    def parse_peers(peer_args: List[str]) -> List[RelayPeer]:
+        peers: List[RelayPeer] = []
+        for peer_arg in peer_args:
+            host, sep, port = peer_arg.rpartition(':')
+            if not sep:
+                host = peer_arg
+                port_num = WSDRelay.DEFAULT_PORT
+            else:
+                port_num = int(port)
+
+            if not host:
+                raise ValueError('invalid relay peer: {}'.format(peer_arg))
+
+            peers.append((host, port_num))
+
+        return peers
+
+    @staticmethod
+    def parse_xaddr_maps(map_args: List[str]) -> List[Tuple[str, str]]:
+        mappings: List[Tuple[str, str]] = []
+        for map_arg in map_args:
+            src, sep, dst = map_arg.partition('=')
+            if not sep or not src or not dst:
+                raise ValueError('invalid relay XAddrs mapping: {}'.format(map_arg))
+            mappings.append((src, dst))
+
+        return mappings
+
+    def attach_mch(self, mch: MulticastHandler) -> None:
+        if mch.address.family != socket.AF_INET:
+            logger.info('relay ignores non-IPv4 interface {}'.format(mch.address.interface))
+            return
+
+        self.mchs.append(mch)
+
+        multicast_handler = WSDRelaySocketHandler(self, mch, 'multicast')
+        self.multicast_handlers[mch] = multicast_handler
+        mch.add_handler(mch.recv_socket, multicast_handler)
+
+        for reply_socket in [mch.mc_send_socket, mch.uc_send_socket]:
+            reply_handler = WSDRelaySocketHandler(self, mch, 'reply')
+            self.reply_handlers[(mch, reply_socket)] = reply_handler
+            mch.add_handler(reply_socket, reply_handler)
+
+    def detach_mch(self, mch: MulticastHandler) -> None:
+        if mch in self.multicast_handlers:
+            mch.remove_handler(mch.recv_socket, self.multicast_handlers[mch])
+            del self.multicast_handlers[mch]
+
+        for reply_socket in [mch.mc_send_socket, mch.uc_send_socket]:
+            key = (mch, reply_socket)
+            if key in self.reply_handlers:
+                mch.remove_handler(reply_socket, self.reply_handlers[key])
+                del self.reply_handlers[key]
+
+        if mch in self.mchs:
+            self.mchs.remove(mch)
+
+    def cleanup(self) -> None:
+        for mch in list(self.mchs):
+            self.detach_mch(mch)
+        self.aio_loop.remove_reader(self.relay_socket.fileno())
+        self.relay_socket.close()
+
+    def handle_local_multicast(self, mch: MulticastHandler, msg: str, src: UdpAddress) -> None:
+        if not self.peers:
+            return
+
+        msg_id = self.extract_message_id(msg)
+        if msg_id and self.is_suppressed_message_id(msg_id):
+            return
+
+        payload = self.rewrite_xaddrs(msg)
+        source = self.source_from_address(src)
+        self.forward_to_peers('multicast', payload, source, self.peers)
+
+    def handle_local_unicast_reply(self, mch: MulticastHandler, msg: str, src: UdpAddress) -> None:
+        if not self.peers:
+            return
+
+        self.expire_pending_routes()
+        relates_to = self.extract_relates_to(msg)
+        if relates_to is None or relates_to not in self.pending_routes:
+            return
+
+        _, peer, original_source = self.pending_routes[relates_to]
+        payload = self.rewrite_xaddrs(msg)
+        self.forward_to_peers('reply', payload, original_source, [peer])
+
+    def read_relay_socket(self) -> None:
+        packet, raw_peer = self.relay_socket.recvfrom(WSD_MAX_LEN * 2)
+        try:
+            envelope = self.decode_envelope(packet)
+        except ValueError as e:
+            logger.warning('invalid relay packet from {}: {}'.format(raw_peer, e))
+            return
+
+        if envelope['relay_id'] == self.relay_id:
+            return
+
+        packet_id = envelope['packet_id']
+        if self.is_recent_packet_id(packet_id):
+            return
+
+        ttl = int(envelope['ttl'])
+        if ttl < 1:
+            logger.debug('dropping relay packet {} with expired ttl'.format(packet_id))
+            return
+
+        packet_type = str(envelope['type'])
+        payload = base64.b64decode(str(envelope['payload_b64'])).decode('utf-8')
+        source = envelope.get('source', {})
+
+        if packet_type == 'multicast':
+            self.handle_remote_multicast(payload, raw_peer, source)
+        elif packet_type == 'reply':
+            self.handle_remote_reply(payload, source)
+        else:
+            logger.warning('unknown relay packet type {}'.format(packet_type))
+
+    def handle_remote_multicast(self, payload: str, raw_peer: Tuple[str, int], source: RelaySource) -> None:
+        msg_id = self.extract_message_id(payload)
+        if msg_id:
+            self.add_suppressed_message_id(msg_id)
+            if isinstance(source, dict):
+                self.add_pending_route(msg_id, raw_peer, source)
+
+        payload = self.rewrite_xaddrs(payload)
+        for mch in self.mchs:
+            try:
+                mch.send(payload.encode('utf-8'), mch.multicast_address)
+            except Exception as e:
+                logger.error('error while rebroadcasting relay packet on {}: {}'.format(mch.address.interface, e))
+
+    def handle_remote_reply(self, payload: str, source: RelaySource) -> None:
+        if not isinstance(source, dict):
+            logger.debug('relay reply without source mapping')
+            return
+
+        host = source.get('address')
+        port = source.get('port')
+        interface = source.get('interface')
+        if not isinstance(host, str) or not isinstance(port, int):
+            logger.debug('relay reply with invalid source mapping')
+            return
+
+        payload = self.rewrite_xaddrs(payload)
+        for mch in self.mchs:
+            if isinstance(interface, str) and mch.address.interface.name != interface:
+                continue
+
+            try:
+                mch.uc_send_socket.sendto(payload.encode('utf-8'), (host, port))
+                return
+            except Exception as e:
+                logger.error('error while sending relay reply to {}:{}: {}'.format(host, port, e))
+
+        logger.debug('no interface found for relay reply to {}:{} via {}'.format(host, port, interface))
+
+    def forward_to_peers(self, packet_type: str, payload: str, source: RelaySource, peers: List[RelayPeer]) -> None:
+        envelope = self.build_envelope(packet_type, payload, source)
+        packet = self.encode_envelope(envelope)
+        for peer in peers:
+            try:
+                self.relay_socket.sendto(packet, peer)
+            except Exception as e:
+                logger.error('error while sending relay packet to {}:{}: {}'.format(peer[0], peer[1], e))
+
+    def build_envelope(self, packet_type: str, payload: str, source: RelaySource) -> RelayEnvelope:
+        return {
+            'magic': self.RELAY_MAGIC,
+            'version': self.RELAY_VERSION,
+            'relay_id': self.relay_id,
+            'packet_id': uuid.uuid4().hex,
+            'type': packet_type,
+            'ttl': args.relay_ttl,
+            'source': source,
+            'payload_b64': base64.b64encode(payload.encode('utf-8')).decode('ascii')
+        }
+
+    def encode_envelope(self, envelope: RelayEnvelope) -> bytes:
+        unsigned = dict(envelope)
+        if self.secret:
+            unsigned['hmac'] = self.sign_envelope(unsigned)
+        return json.dumps(unsigned, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+    def decode_envelope(self, packet: bytes) -> RelayEnvelope:
+        try:
+            envelope = json.loads(packet.decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError('cannot decode packet: {}'.format(e))
+
+        if not isinstance(envelope, dict):
+            raise ValueError('packet is not an object')
+
+        if envelope.get('magic') != self.RELAY_MAGIC:
+            raise ValueError('wrong magic')
+
+        if envelope.get('version') != self.RELAY_VERSION:
+            raise ValueError('unsupported version')
+
+        for key in ['relay_id', 'packet_id', 'type', 'ttl', 'payload_b64']:
+            if key not in envelope:
+                raise ValueError('missing {}'.format(key))
+
+        if self.secret:
+            provided_hmac = envelope.get('hmac')
+            if not isinstance(provided_hmac, str):
+                raise ValueError('missing hmac')
+
+            unsigned = dict(envelope)
+            del unsigned['hmac']
+            expected_hmac = self.sign_envelope(unsigned)
+            if not hmac.compare_digest(provided_hmac, expected_hmac):
+                raise ValueError('invalid hmac')
+
+        return envelope
+
+    def sign_envelope(self, envelope: RelayEnvelope) -> str:
+        unsigned = dict(envelope)
+        unsigned.pop('hmac', None)
+        payload = json.dumps(unsigned, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return hmac.new(self.secret or b'', payload, hashlib.sha256).hexdigest()
+
+    def source_from_address(self, src: UdpAddress) -> RelaySource:
+        return {
+            'address': src.address_str,
+            'port': src.port,
+            'interface': src.interface.name
+        }
+
+    def add_pending_route(self, msg_id: str, peer: RelayPeer, source: RelaySource) -> None:
+        self.expire_pending_routes()
+        if len(self.pending_routes) >= self.MAX_PENDING_ROUTES:
+            oldest = min(self.pending_routes.items(), key=lambda item: item[1][0])[0]
+            del self.pending_routes[oldest]
+
+        self.pending_routes[msg_id] = (time.time(), peer, source)
+
+    def expire_pending_routes(self) -> None:
+        cut = time.time() - self.PENDING_ROUTE_TIMEOUT
+        self.pending_routes = dict(filter(lambda item: item[1][0] > cut, self.pending_routes.items()))
+
+    def is_recent_packet_id(self, packet_id: str) -> bool:
+        if packet_id in self.recent_packet_id_set:
+            return True
+
+        if len(self.recent_packet_ids) == self.recent_packet_ids.maxlen:
+            removed = self.recent_packet_ids.popleft()
+            self.recent_packet_id_set.remove(removed)
+
+        self.recent_packet_ids.append(packet_id)
+        self.recent_packet_id_set.add(packet_id)
+        return False
+
+    def add_suppressed_message_id(self, msg_id: str) -> None:
+        if msg_id in self.suppressed_message_id_set:
+            return
+
+        if len(self.suppressed_message_ids) == self.suppressed_message_ids.maxlen:
+            removed = self.suppressed_message_ids.popleft()
+            self.suppressed_message_id_set.remove(removed)
+
+        self.suppressed_message_ids.append(msg_id)
+        self.suppressed_message_id_set.add(msg_id)
+
+    def is_suppressed_message_id(self, msg_id: str) -> bool:
+        return msg_id in self.suppressed_message_id_set
+
+    def rewrite_xaddrs(self, msg: str) -> str:
+        if not self.xaddr_maps:
+            return msg
+
+        try:
+            tree = ETfromString(msg)
+        except ElementTree.ParseError:
+            logger.debug('cannot rewrite XAddrs in malformed XML')
+            return msg
+
+        changed = False
+        xaddr_nodes = tree.findall('.//wsd:XAddrs', namespaces)
+        for node in xaddr_nodes:
+            if node.text is None:
+                continue
+
+            rewritten_addrs = []
+            for xaddr in node.text.split():
+                rewritten = xaddr
+                for src, dst in self.xaddr_maps:
+                    if rewritten.startswith(src):
+                        rewritten = dst + rewritten[len(src):]
+                        changed = True
+                        break
+                rewritten_addrs.append(rewritten)
+
+            node.text = ' '.join(rewritten_addrs)
+
+        if not changed:
+            return msg
+
+        logger.info('rewrote WS-Discovery XAddrs in relayed packet')
+        return self.xml_to_str(tree)
+
+    @staticmethod
+    def xml_to_str(xml: ElementTree.Element) -> str:
+        retval = '<?xml version="1.0" encoding="utf-8"?>'
+        retval = retval + ElementTree.tostring(xml, encoding='utf-8').decode('utf-8')
+
+        return retval
+
+    @staticmethod
+    def extract_message_id(msg: str) -> Optional[str]:
+        return WSDRelay.extract_header_text(msg, './soap:Header/wsa:MessageID')
+
+    @staticmethod
+    def extract_relates_to(msg: str) -> Optional[str]:
+        return WSDRelay.extract_header_text(msg, './soap:Header/wsa:RelatesTo')
+
+    @staticmethod
+    def extract_header_text(msg: str, xpath: str) -> Optional[str]:
+        try:
+            tree = ETfromString(msg)
+        except ElementTree.ParseError:
+            return None
+
+        value = tree.findtext(xpath, None, namespaces)
+        return str(value) if value else None
+
+
 class WSDHttpMessageHandler(WSDMessageHandler):
 
     def __init__(self) -> None:
@@ -1361,6 +1773,9 @@ class NetworkAddressMonitor(metaclass=MetaEnumAfterInit):
         mch = MulticastHandler(address, self.aio_loop)
         self.mchs.append(mch)
 
+        if WSDRelay.instance is not None:
+            WSDRelay.instance.attach_mch(mch)
+
         if not args.no_host:
             WSDHost(mch)
             if not args.no_http:
@@ -1394,6 +1809,9 @@ class NetworkAddressMonitor(metaclass=MetaEnumAfterInit):
                 s.server_close()
                 self.http_servers.remove(s)
 
+        if WSDRelay.instance is not None:
+            WSDRelay.instance.detach_mch(mch)
+
         mch.cleanup()
         self.mchs.remove(mch)
 
@@ -1419,6 +1837,10 @@ class NetworkAddressMonitor(metaclass=MetaEnumAfterInit):
 
         for s in self.http_servers:
             s.server_close()
+
+        if WSDRelay.instance is not None:
+            for mch in list(self.mchs):
+                WSDRelay.instance.detach_mch(mch)
 
         self.http_servers.clear()
 
@@ -1978,6 +2400,28 @@ def parse_args() -> None:
         help='send multicast traffic/receive replies on this port',
         type=int,
         default=0)
+    parser.add_argument(
+        '--relay-peer',
+        help='forward WS-Discovery multicast to relay peer HOST[:PORT]',
+        action='append', default=[])
+    parser.add_argument(
+        '--relay-listen-port',
+        help='UDP port for incoming relay packets (default = {})'.format(WSDRelay.DEFAULT_PORT),
+        type=int,
+        default=WSDRelay.DEFAULT_PORT)
+    parser.add_argument(
+        '--relay-ttl',
+        help='maximum relay hops for tunneled packets (default = 4)',
+        type=int,
+        default=4)
+    parser.add_argument(
+        '--relay-secret',
+        help='shared secret for relay packet HMAC validation',
+        default=None)
+    parser.add_argument(
+        '--relay-xaddr-map',
+        help='rewrite relayed WS-Discovery XAddrs from FROM to TO using FROM=TO',
+        action='append', default=[])
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -2004,6 +2448,13 @@ def parse_args() -> None:
 
     if not args.interface:
         logger.warning('no interface given, using all interfaces')
+
+    if args.relay_peer and not args.ipv4only:
+        logger.warning('relay mode currently supports IPv4 WS-Discovery only; consider using -4/--ipv4only')
+
+    if args.relay_ttl < 1:
+        logger.error('relay TTL must be at least 1')
+        sys.exit(1)
 
     if not args.uuid:
         def read_uuid_from_file(fn: str) -> Union[None, uuid.UUID]:
@@ -2104,6 +2555,7 @@ def main() -> int:
         return 4
 
     aio_loop = asyncio.new_event_loop()
+    relay = WSDRelay(aio_loop) if args.relay_peer else None
     nm = create_address_monitor(platform.system(), aio_loop)
 
     api_server = None
@@ -2142,6 +2594,8 @@ def main() -> int:
             aio_loop.run_until_complete(api_server.cleanup())
 
         nm.cleanup()
+        if relay is not None:
+            relay.cleanup()
         aio_loop.stop()
     except Exception:
         logger.exception('error in main loop')
