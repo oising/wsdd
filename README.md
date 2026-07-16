@@ -199,6 +199,13 @@ below for details.
      to a multicast as part of the flow, so the port needs to be fixed in order
      to be allowed manually.
 
+ * `--onvif-debug`
+
+     Enable DEBUG-level logging focused on ONVIF WS-Discovery detection and
+     relay processing. This logs packet stages, source addresses, WSD actions,
+     message IDs, ONVIF type/scope indicators, and `XAddrs` values without
+     requiring `-vv`.
+
  * `--relay-peer HOST[:PORT]`
 
      Forward local IPv4 WS-Discovery multicast packets to a remote wsdd relay
@@ -258,6 +265,10 @@ below for details.
      Additively increase verbosity of the log output. A single occurrence of
      -v/--verbose sets the log level to INFO. More -v options set the log level
      to DEBUG.
+
+     wsdd always prints a short startup/status summary to stderr so foreground
+     launches show the selected operational modes and listening sockets even
+     without verbose logging.
 
  * `-V`, `--version`
 
@@ -345,6 +356,25 @@ command line arguments (see above). Upon startup a _Hello_ message is sent.
 When wsdd terminates due to a SIGTERM signal or keyboard interrupt, a graceful
 shutdown is performed by sending a _Bye_ message. I/O multiplexing is used to
 handle network traffic of the different sockets within a single process.
+
+## Startup Status Output
+
+When started in the foreground, wsdd prints a few status lines to stderr before
+entering the event loop. These lines are emitted even without `-v`, so it is
+clear whether the process is waiting, listening, or running in relay mode.
+
+Example:
+
+```
+wsdd: starting version=0.9 modes=host,relay families=IPv4 interfaces=eth0 autostart=enabled onvif_debug=disabled
+wsdd: relay listening on udp/3703 peers=100.96.0.20:3703 hmac=enabled xaddr_maps=1
+wsdd: listening on eth0 192.168.1.10 (IPv4) multicast=239.255.255.250 udp=3702 http=('192.168.1.10', 5357)
+wsdd: ready; entering event loop
+```
+
+If `--no-autostart` is used, wsdd reports that networking is inactive until the
+API `start` command is received. Use `-v`, `-vv`, or `--onvif-debug` for
+packet-level detail after startup.
 
 ## Relay Mode for Routed or Mesh Networks
 
@@ -500,7 +530,10 @@ needs it.
    interfaces.
  * Use `--no-host` for a pure relay proxy that should not advertise the relay
    machine itself as a WSD host.
- * Use `-v` or `-vv` while testing to see relay activity and XAddrs rewrites.
+ * Use `--onvif-debug` while testing to see ONVIF-specific detection and relay
+   stages, including multicast capture, unicast forwarding, remote rebroadcast,
+   reply delivery, ONVIF type/scope markers, and `XAddrs` values.
+ * Use `-v` or `-vv` for broader wsdd logging while testing relay activity.
  * Use the same `--relay-secret` on all peers that should exchange relay
    packets.
  * Confirm that normal unicast connectivity to the final ONVIF/HTTP/RTSP

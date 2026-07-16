@@ -59,6 +59,11 @@ args: argparse.Namespace
 logger: logging.Logger
 
 
+def status_notice(message: str) -> None:
+    sys.stderr.write('wsdd: {}\n'.format(message))
+    sys.stderr.flush()
+
+
 class NetworkInterface:
 
     _name: str
@@ -221,6 +226,15 @@ class MulticastHandler:
         logger.info('joined multicast group {0} on {1}'.format(self.multicast_address.transport_str, self.address))
         logger.debug('transport address on {0} is {1}'.format(self.address.interface.name, self.address.transport_str))
         logger.debug('will listen for HTTP traffic on address {0}'.format(self.listen_address))
+        family = 'IPv4' if self.address.family == socket.AF_INET else 'IPv6'
+        http_state = 'disabled' if args.no_http else '{}'.format(self.listen_address)
+        status_notice('listening on {} {} ({}) multicast={} udp={} http={}'.format(
+            self.address.interface.name,
+            self.address.transport_str,
+            family,
+            self.multicast_address.transport_str,
+            WSD_UDP_PORT,
+            http_state))
 
         # register calbacks for incoming data (also for mc)
         self.aio_loop.add_reader(self.recv_socket.fileno(), self.read_socket, self.recv_socket)
@@ -354,9 +368,11 @@ class MulticastHandler:
 
         msg, raw_address = s.recvfrom(WSD_MAX_LEN)
         address = UdpAddress(self.address.family, raw_address, self.address.interface)
+        decoded_msg = msg.decode('utf-8')
+        ONVIFDebugLogger.log_packet('socket-receive', decoded_msg, address)
         if s in self.message_handlers:
             for handler in self.message_handlers[s]:
-                handler.handle_packet(msg.decode('utf-8'), address)
+                handler.handle_packet(decoded_msg, address)
 
     def send(self, msg: bytes, addr: UdpAddress):
         # Request from a client must be answered from a socket that is bound
@@ -380,7 +396,8 @@ namespaces: Dict[str, str] = {
     'wsx': 'http://schemas.xmlsoap.org/ws/2004/09/mex',
     'wsdp': WSDP_URI,
     'pnpx': 'http://schemas.microsoft.com/windows/pnpx/2005/10',
-    'pub': 'http://schemas.microsoft.com/windows/pub/2005/07'
+    'pub': 'http://schemas.microsoft.com/windows/pub/2005/07',
+    'dn': 'http://www.onvif.org/ver10/network/wsdl'
 }
 
 WSD_MAX_KNOWN_MESSAGES: int = 10
@@ -429,6 +446,91 @@ wsd_instance_id: int = int(time.time())
 
 WSDMessage = Tuple[ElementTree.Element, str]
 MessageTypeHandler = Callable[[ElementTree.Element, ElementTree.Element], Optional[WSDMessage]]
+
+
+class ONVIFDebugLogger:
+
+    ONVIF_MARKERS: ClassVar[Tuple[str, ...]] = (
+        'onvif',
+        'NetworkVideoTransmitter',
+        'http://www.onvif.org/ver10/network/wsdl',
+        'onvif://www.onvif.org',
+        '/onvif/device_service'
+    )
+
+    @staticmethod
+    def enabled() -> bool:
+        return bool(getattr(args, 'onvif_debug', False))
+
+    @staticmethod
+    def log_packet(stage: str, msg: str, src: Optional[UdpAddress] = None) -> None:
+        if not ONVIFDebugLogger.enabled():
+            return
+
+        try:
+            tree = ETfromString(msg)
+        except ElementTree.ParseError:
+            logger.debug('ONVIF debug: stage={} malformed XML packet from {}'.format(
+                stage, ONVIFDebugLogger.format_src(src)))
+            return
+
+        ONVIFDebugLogger.log_tree(stage, tree, src)
+
+    @staticmethod
+    def log_tree(stage: str, tree: ElementTree.Element, src: Optional[UdpAddress] = None) -> None:
+        if not ONVIFDebugLogger.enabled():
+            return
+
+        action = tree.findtext('./soap:Header/wsa:Action', '', namespaces)
+        msg_id = tree.findtext('./soap:Header/wsa:MessageID', '', namespaces)
+        relates_to = tree.findtext('./soap:Header/wsa:RelatesTo', '', namespaces)
+        types = ONVIFDebugLogger.collect_text(tree, 'Types')
+        scopes = ONVIFDebugLogger.collect_text(tree, 'Scopes')
+        xaddrs = ONVIFDebugLogger.collect_text(tree, 'XAddrs')
+        endpoints = ONVIFDebugLogger.collect_text(tree, 'Address')
+
+        values = [action, msg_id, relates_to] + types + scopes + xaddrs + endpoints
+        detected = ONVIFDebugLogger.contains_onvif_marker(values)
+        if detected:
+            logger.debug(
+                'ONVIF debug: detected stage={} src={} action={} msg={} relates={} types={} scopes={} xaddrs={}'
+                .format(
+                    stage,
+                    ONVIFDebugLogger.format_src(src),
+                    action or '-',
+                    msg_id or '-',
+                    relates_to or '-',
+                    ONVIFDebugLogger.format_values(types),
+                    ONVIFDebugLogger.format_values(scopes),
+                    ONVIFDebugLogger.format_values(xaddrs)))
+        else:
+            logger.debug('ONVIF debug: no ONVIF markers stage={} src={} action={} msg={}'.format(
+                stage, ONVIFDebugLogger.format_src(src), action or '-', msg_id or '-'))
+
+    @staticmethod
+    def collect_text(root: ElementTree.Element, local_name: str) -> List[str]:
+        values = []
+        for node in root.iter():
+            _, _, node_name = node.tag.rpartition('}')
+            if node_name == local_name and node.text:
+                values.extend(node.text.split())
+        return values
+
+    @staticmethod
+    def contains_onvif_marker(values: List[str]) -> bool:
+        joined = ' '.join(values).lower()
+        return any(marker.lower() in joined for marker in ONVIFDebugLogger.ONVIF_MARKERS)
+
+    @staticmethod
+    def format_values(values: List[str]) -> str:
+        return ','.join(values) if values else '-'
+
+    @staticmethod
+    def format_src(src: Optional[UdpAddress]) -> str:
+        if src is None:
+            return '-'
+
+        return '{}:{}({})'.format(src.transport_str, src.port, src.interface)
 
 
 class WSDMessageHandler(INetworkPacketHandler):
@@ -545,6 +647,7 @@ class WSDMessageHandler(INetworkPacketHandler):
 
         action: str = str(action_tag.text)
         _, _, action_method = action.rpartition('/')
+        ONVIFDebugLogger.log_tree('wsd-handle-message', tree, src)
 
         if src:
             logger.info('{}:{}({}) - - "{} {} UDP" - -'.format(
@@ -1106,6 +1209,12 @@ class WSDRelay:
         self.aio_loop.add_reader(self.relay_socket.fileno(), self.read_relay_socket)
 
         logger.info('relay enabled on UDP port {} with {} peer(s)'.format(args.relay_listen_port, len(self.peers)))
+        peer_list = ','.join(['{}:{}'.format(host, port) for host, port in self.peers]) or '-'
+        status_notice('relay listening on udp/{} peers={} hmac={} xaddr_maps={}'.format(
+            args.relay_listen_port,
+            peer_list,
+            'enabled' if self.secret else 'disabled',
+            len(self.xaddr_maps)))
 
     @staticmethod
     def parse_peers(peer_args: List[str]) -> List[RelayPeer]:
@@ -1176,6 +1285,7 @@ class WSDRelay:
         if not self.peers:
             return
 
+        ONVIFDebugLogger.log_packet('relay-local-multicast-capture', msg, src)
         msg_id = self.extract_message_id(msg)
         if msg_id and self.is_suppressed_message_id(msg_id):
             return
@@ -1188,6 +1298,7 @@ class WSDRelay:
         if not self.peers:
             return
 
+        ONVIFDebugLogger.log_packet('relay-local-unicast-reply-capture', msg, src)
         self.expire_pending_routes()
         relates_to = self.extract_relates_to(msg)
         if relates_to is None or relates_to not in self.pending_routes:
@@ -1220,6 +1331,7 @@ class WSDRelay:
         packet_type = str(envelope['type'])
         payload = base64.b64decode(str(envelope['payload_b64'])).decode('utf-8')
         source = envelope.get('source', {})
+        ONVIFDebugLogger.log_packet('relay-unicast-receive-{}'.format(packet_type), payload, None)
 
         if packet_type == 'multicast':
             self.handle_remote_multicast(payload, raw_peer, source)
@@ -1236,6 +1348,7 @@ class WSDRelay:
                 self.add_pending_route(msg_id, raw_peer, source)
 
         payload = self.rewrite_xaddrs(payload)
+        ONVIFDebugLogger.log_packet('relay-remote-multicast-rebroadcast', payload, None)
         for mch in self.mchs:
             try:
                 mch.send(payload.encode('utf-8'), mch.multicast_address)
@@ -1255,6 +1368,7 @@ class WSDRelay:
             return
 
         payload = self.rewrite_xaddrs(payload)
+        ONVIFDebugLogger.log_packet('relay-remote-reply-deliver', payload, None)
         for mch in self.mchs:
             if isinstance(interface, str) and mch.address.interface.name != interface:
                 continue
@@ -1268,6 +1382,7 @@ class WSDRelay:
         logger.debug('no interface found for relay reply to {}:{} via {}'.format(host, port, interface))
 
     def forward_to_peers(self, packet_type: str, payload: str, source: RelaySource, peers: List[RelayPeer]) -> None:
+        ONVIFDebugLogger.log_packet('relay-unicast-forward-{}'.format(packet_type), payload, None)
         envelope = self.build_envelope(packet_type, payload, source)
         packet = self.encode_envelope(envelope)
         for peer in peers:
@@ -1568,13 +1683,16 @@ class ApiServer:
             # create socket from systemd file descriptor/socket
             self.server = await aio_loop.create_task(asyncio.start_unix_server(  # type: ignore
                 self.on_connect, sock=listen_address))
+            status_notice('API listening on systemd-provided socket')
         elif isinstance(listen_address, int) or listen_address.isnumeric():
             self.server = await aio_loop.create_task(asyncio.start_server(  # type: ignore
                 self.on_connect, host='localhost', port=int(listen_address), reuse_address=True,
                 reuse_port=True))
+            status_notice('API listening on localhost:{}'.format(int(listen_address)))
         else:
             self.server = await aio_loop.create_task(asyncio.start_unix_server(  # type: ignore
                 self.on_connect, path=listen_address))
+            status_notice('API listening on {}'.format(listen_address))
 
     async def on_connect(self, read_stream: asyncio.StreamReader, write_stream: asyncio.StreamWriter) -> None:
         self.clients.append(write_stream)
@@ -2331,6 +2449,10 @@ def parse_args() -> None:
         help='increase verbosity',
         action='count', default=0)
     parser.add_argument(
+        '--onvif-debug',
+        help='enable debug logging for ONVIF WS-Discovery detection and relay processing',
+        action='store_true')
+    parser.add_argument(
         '-d', '--domain',
         help='set domain name (disables workgroup)',
         default=None)
@@ -2429,14 +2551,18 @@ def parse_args() -> None:
         print('wsdd - Web Service Discovery Daemon, v{}'.format(WSDD_VERSION))
         sys.exit(0)
 
-    if args.verbose == 1:
+    if args.onvif_debug:
+        log_level = logging.DEBUG
+    elif args.verbose == 1:
         log_level = logging.INFO
     elif args.verbose > 1:
         log_level = logging.DEBUG
-        asyncio.get_event_loop().set_debug(True)
-        logging.getLogger("asyncio").setLevel(logging.DEBUG)
     else:
         log_level = logging.WARNING
+
+    if log_level == logging.DEBUG:
+        asyncio.get_event_loop().set_debug(True)
+        logging.getLogger("asyncio").setLevel(logging.DEBUG)
 
     if args.shortlog:
         fmt = '%(levelname)s: %(message)s'
@@ -2545,6 +2671,40 @@ def create_address_monitor(system: str, aio_loop: asyncio.AbstractEventLoop) -> 
         raise NotImplementedError('unsupported OS: ' + system)
 
 
+def get_operational_modes() -> str:
+    modes = []
+    if not args.no_host:
+        modes.append('host')
+    if args.discovery:
+        modes.append('discovery')
+    if args.relay_peer:
+        modes.append('relay')
+
+    return ','.join(modes) if modes else 'none'
+
+
+def get_address_family_mode() -> str:
+    if args.ipv4only:
+        return 'IPv4'
+    if args.ipv6only:
+        return 'IPv6'
+
+    return 'IPv4+IPv6'
+
+
+def emit_startup_summary() -> None:
+    status_notice('starting version={} modes={} families={} interfaces={} autostart={} onvif_debug={}'.format(
+        WSDD_VERSION,
+        get_operational_modes(),
+        get_address_family_mode(),
+        ','.join(args.interface) if args.interface else 'all',
+        'disabled' if args.no_autostart else 'enabled',
+        'enabled' if args.onvif_debug else 'disabled'))
+
+    if args.no_autostart:
+        status_notice("networking is inactive until the API 'start' command is received")
+
+
 def main() -> int:
     global logger, args  # noqa: F824
 
@@ -2555,6 +2715,7 @@ def main() -> int:
         return 4
 
     aio_loop = asyncio.new_event_loop()
+    emit_startup_summary()
     relay = WSDRelay(aio_loop) if args.relay_peer else None
     nm = create_address_monitor(platform.system(), aio_loop)
 
@@ -2586,6 +2747,7 @@ def main() -> int:
     # main loop, serve requests coming from any outbound socket
     aio_loop.add_signal_handler(signal.SIGINT, sigterm_handler)
     aio_loop.add_signal_handler(signal.SIGTERM, sigterm_handler)
+    status_notice('ready; entering event loop')
     try:
         aio_loop.run_forever()
     except (SystemExit, KeyboardInterrupt):

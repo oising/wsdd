@@ -14,7 +14,7 @@ spec = importlib.util.spec_from_file_location("wsdd", module_path)
 wsdd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wsdd)
 
-wsdd.args = argparse.Namespace(relay_ttl=4)
+wsdd.args = argparse.Namespace(relay_ttl=4, onvif_debug=True)
 wsdd.logger = logging.getLogger("wsdd-test")
 
 relay = object.__new__(wsdd.WSDRelay)
@@ -61,4 +61,26 @@ rewritten = relay.rewrite_xaddrs(xml)
 assert "http://100.96.0.20/camera/5/onvif/device_service" in rewritten
 assert "http://10.0.0.5/keep" in rewritten
 assert relay.rewrite_xaddrs("<not-xml") == "<not-xml"
+
+tree = wsdd.ETfromString("""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope
+  xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+  xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery"
+  xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
+  <soap:Header>
+    <wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>
+    <wsa:MessageID>urn:uuid:onvif-probe</wsa:MessageID>
+  </soap:Header>
+  <soap:Body>
+    <wsd:Probe>
+      <wsd:Types>dn:NetworkVideoTransmitter</wsd:Types>
+      <wsd:Scopes>onvif://www.onvif.org/type/video_encoder</wsd:Scopes>
+    </wsd:Probe>
+  </soap:Body>
+</soap:Envelope>""")
+types = wsdd.ONVIFDebugLogger.collect_text(tree, "Types")
+scopes = wsdd.ONVIFDebugLogger.collect_text(tree, "Scopes")
+assert wsdd.ONVIFDebugLogger.contains_onvif_marker(types + scopes)
+assert wsdd.ONVIFDebugLogger.enabled()
 PY

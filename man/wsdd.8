@@ -61,6 +61,12 @@ This is useful for firewalls that do not detect incoming unicast replies
 to a multicast as part of the flow, so the port needs to be fixed in order
 to be allowed manually.
 .TP
+\fB\-\-onvif-debug\fR
+Enable DEBUG-level logging focused on ONVIF WS-Discovery detection and relay
+processing. This logs packet stages, source addresses, WSD actions, message
+IDs, ONVIF type/scope indicators, and XAddrs values without requiring
+\fB\-vv\fR.
+.TP
 \fB\-\-relay-peer\ \fIHOST[:PORT]\fR
 Forward local IPv4 WS-Discovery multicast packets to a remote wsdd relay peer
 using unicast UDP. This option can be specified multiple times. If the port is
@@ -110,6 +116,9 @@ can use this option.
 Additively increase verbosity of the log output. A single occurrence of
 -v/--verbose sets the log level to INFO. More -v options set the log level
 to DEBUG.
+Wsdd always prints a short startup/status summary to stderr so foreground
+launches show the selected operational modes and listening sockets even without
+verbose logging.
 .TP
 \fB\-V\fR, \fB\-\-version\fR
 Show the version number and exit.
@@ -313,3 +322,17 @@ For ONVIF cameras that advertise addresses not reachable from the other side of
 the mesh, add explicit XAddrs rewrite rules. The rewritten target must already
 route or proxy to the camera service. wsdd does not proxy ONVIF control or media
 traffic; it only rewrites discovery addresses when instructed.
+.PP
+Use \fB\-\-onvif-debug\fR while testing relay mode to log ONVIF-specific packet
+detection and relay stages, including multicast capture, unicast forwarding,
+remote rebroadcast, reply delivery, ONVIF type/scope markers, and XAddrs
+values.
+
+.SS Startup Status Output
+.PP
+When started in the foreground, wsdd prints a few status lines to stderr before
+entering the event loop. These lines are emitted even without \fB\-v\fR, so it
+is clear whether the process is waiting, listening, or running in relay mode.
+If \fB\-\-no-autostart\fR is used, wsdd reports that networking is inactive until
+the API start command is received. Use \fB\-v\fR, \fB\-vv\fR, or
+\fB\-\-onvif-debug\fR for packet-level detail after startup.
