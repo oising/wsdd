@@ -1484,6 +1484,10 @@ class WSDRelay:
         ONVIFDebugLogger.log_packet('relay-remote-multicast-rebroadcast', payload, None)
         for mch in self.mchs:
             try:
+                logger.debug('relay rebroadcasting multicast on {} via {} to {}'.format(
+                    mch.address.interface,
+                    mch.address.transport_str,
+                    mch.multicast_address.transport_str))
                 mch.send(payload.encode('utf-8'), mch.multicast_address)
             except Exception as e:
                 logger.error('error while rebroadcasting relay packet on {}: {}'.format(mch.address.interface, e))
