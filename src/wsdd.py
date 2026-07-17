@@ -1331,7 +1331,8 @@ class WSDRelay:
         packet_type = str(envelope['type'])
         payload = base64.b64decode(str(envelope['payload_b64'])).decode('utf-8')
         source = envelope.get('source', {})
-        ONVIFDebugLogger.log_packet('relay-unicast-receive-{}'.format(packet_type), payload, None)
+        if packet_type in ['multicast', 'reply']:
+            ONVIFDebugLogger.log_packet('relay-unicast-receive-{}'.format(packet_type), payload, None)
 
         if packet_type == 'multicast':
             self.handle_remote_multicast(payload, raw_peer, source)
