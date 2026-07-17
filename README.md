@@ -551,8 +551,9 @@ needs it.
    stages, including multicast capture, unicast forwarding, remote rebroadcast,
    reply delivery, ONVIF type/scope markers, and `XAddrs` values. Colored
    prefixes show whether a packet is `LOCAL`, `REMOTE`, relay `TX`, or relay
-   `RX`; sequence labels such as `S2` help correlate related WS-Discovery
-   request/response messages.
+   `RX`; when available, the WS-Discovery action verb such as `Hello`,
+   `Probe`, or `ResolveMatches` is included before sequence labels such as
+   `S2` that help correlate related request/response messages.
  * Use `-v` or `-vv` for broader wsdd logging while testing relay activity.
  * Use the same `--relay-secret` on all peers that should exchange relay
    packets.

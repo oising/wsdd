@@ -90,7 +90,24 @@ assert wsdd.ONVIFDebugLogger.contains_onvif_marker(types + scopes)
 assert wsdd.ONVIFDebugLogger.enabled()
 assert wsdd.ONVIFDebugLogger.prefix("relay-local-multicast-capture", "detected", "urn:uuid:a").startswith(
     "[ONVIF LOCAL S")
+assert wsdd.ONVIFDebugLogger.prefix("relay-local-multicast-capture", "detected", "urn:uuid:a", "Hello").startswith(
+    "[ONVIF LOCAL Hello S")
+assert wsdd.ONVIFDebugLogger.prefix("relay-local-unicast-reply-capture", "detected", "urn:uuid:a").startswith(
+    "[ONVIF LOCAL S")
 assert wsdd.ONVIFDebugLogger.prefix("relay-remote-multicast-rebroadcast", "detected", "urn:uuid:a").startswith(
     "[ONVIF REMOTE S")
+assert wsdd.ONVIFDebugLogger.prefix(
+    "relay-remote-multicast-rebroadcast", "detected", "urn:uuid:a", "Probe").startswith("[ONVIF REMOTE Probe S")
+assert wsdd.ONVIFDebugLogger.prefix("relay-remote-reply-deliver", "detected", "urn:uuid:a").startswith(
+    "[ONVIF REMOTE S")
 assert wsdd.ONVIFDebugLogger.prefix("relay-unicast-forward-multicast", "wsd", "urn:uuid:a").startswith("[WSD TX S")
+assert wsdd.ONVIFDebugLogger.prefix(
+    "relay-unicast-forward-multicast", "wsd", "urn:uuid:a", "ResolveMatches").startswith(
+        "[WSD TX ResolveMatches S")
+assert wsdd.ONVIFDebugLogger.prefix("relay-unicast-receive-multicast", "wsd", "urn:uuid:a").startswith("[WSD RX S")
+assert wsdd.ONVIFDebugLogger.prefix("socket-receive", "detected", "urn:uuid:a").startswith("[ONVIF LOCAL S")
+assert wsdd.ONVIFDebugLogger.prefix("wsd-handle-message", "detected", "urn:uuid:a").startswith("[ONVIF LOCAL S")
+assert wsdd.ONVIFDebugLogger.sequence_label("urn:uuid:a") == wsdd.ONVIFDebugLogger.sequence_label("urn:uuid:a")
+assert wsdd.ONVIFDebugLogger.sequence_label("urn:uuid:a").startswith("S")
+assert wsdd.ONVIFDebugLogger.action_verb("http://schemas.xmlsoap.org/ws/2005/04/discovery/Resolve") == "Resolve"
 PY

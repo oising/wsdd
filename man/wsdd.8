@@ -341,8 +341,9 @@ Use \fB\-\-onvif-debug\fR while testing relay mode to log ONVIF-specific packet
 detection and relay stages, including multicast capture, unicast forwarding,
 remote rebroadcast, reply delivery, ONVIF type/scope markers, and XAddrs
 values. Colored prefixes show whether a packet is LOCAL, REMOTE, relay TX, or
-relay RX; sequence labels such as S2 help correlate related WS-Discovery
-request/response messages.
+relay RX; when available, the WS-Discovery action verb such as Hello, Probe, or
+ResolveMatches is included before sequence labels such as S2 that help
+correlate related request/response messages.
 .PP
 Use \fB\-\-ping\fR with \fB\-\-relay-peer\fR and \fB\-\-relay-secret\fR to verify
 that the remote relay process is reachable over unicast UDP and using the same

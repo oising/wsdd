@@ -513,7 +513,8 @@ class ONVIFDebugLogger:
         values = [action, msg_id, relates_to] + types + scopes + xaddrs + endpoints
         detected = ONVIFDebugLogger.contains_onvif_marker(values)
         sequence_key = relates_to or msg_id or action or stage
-        prefix = ONVIFDebugLogger.prefix(stage, 'detected' if detected else 'wsd', sequence_key)
+        action_verb = ONVIFDebugLogger.action_verb(action)
+        prefix = ONVIFDebugLogger.prefix(stage, 'detected' if detected else 'wsd', sequence_key, action_verb)
         if detected:
             logger.debug(
                 '{} detected stage={} src={} action={} msg={} relates={} types={} scopes={} xaddrs={}'
@@ -532,14 +533,19 @@ class ONVIFDebugLogger:
                 prefix, stage, ONVIFDebugLogger.format_src(src), action or '-', msg_id or '-'))
 
     @staticmethod
-    def prefix(stage: str, kind: str, sequence_key: Optional[str]) -> str:
+    def prefix(stage: str, kind: str, sequence_key: Optional[str], action_verb: Optional[str] = None) -> str:
         label = ONVIFDebugLogger.stage_label(stage)
         marker = 'ONVIF' if kind == 'detected' else 'WSD'
         if kind == 'malformed':
             marker = 'ERR'
 
         seq = ONVIFDebugLogger.sequence_label(sequence_key)
-        text = '[{} {}{}]'.format(marker, label, ' ' + seq if seq else '')
+        action = action_verb or ''
+        text = '[{} {}{}{}]'.format(
+            marker,
+            label,
+            ' ' + action if action else '',
+            ' ' + seq if seq else '')
         if not ONVIFDebugLogger.color_enabled():
             return text
 
@@ -550,10 +556,11 @@ class ONVIFDebugLogger:
             label_color = ONVIFDebugLogger.COLOR_LABELS['WSD']
 
         seq_color = ONVIFDebugLogger.sequence_color(sequence_key)
-        return '{}[{} {}{}]{}'.format(
+        return '{}[{} {}{}{}]{}'.format(
             label_color,
             marker,
             label,
+            ' ' + action if action else '',
             '{} {}'.format(seq_color, seq) if seq and seq_color else ' ' + seq if seq else '',
             ONVIFDebugLogger.COLOR_RESET)
 
@@ -597,6 +604,14 @@ class ONVIFDebugLogger:
 
         digest = hashlib.sha1(sequence_key.encode('utf-8')).hexdigest()
         return ONVIFDebugLogger.SEQUENCE_COLORS[int(digest[:2], 16) % len(ONVIFDebugLogger.SEQUENCE_COLORS)]
+
+    @staticmethod
+    def action_verb(action: str) -> str:
+        if not action:
+            return ''
+
+        _, _, verb = action.rpartition('/')
+        return verb or action
 
     @staticmethod
     def collect_text(root: ElementTree.Element, local_name: str) -> List[str]:
