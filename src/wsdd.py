@@ -450,6 +450,25 @@ MessageTypeHandler = Callable[[ElementTree.Element, ElementTree.Element], Option
 
 class ONVIFDebugLogger:
 
+    COLOR_RESET: ClassVar[str] = '\033[0m'
+    COLOR_DIM: ClassVar[str] = '\033[2m'
+    COLOR_LABELS: ClassVar[Dict[str, str]] = {
+        'LOCAL': '\033[32m',
+        'REMOTE': '\033[35m',
+        'RX': '\033[36m',
+        'TX': '\033[33m',
+        'WSD': '\033[90m',
+        'ERR': '\033[31m'
+    }
+    SEQUENCE_COLORS: ClassVar[Tuple[str, ...]] = (
+        '\033[34m',
+        '\033[36m',
+        '\033[32m',
+        '\033[33m',
+        '\033[35m',
+        '\033[94m'
+    )
+
     ONVIF_MARKERS: ClassVar[Tuple[str, ...]] = (
         'onvif',
         'NetworkVideoTransmitter',
@@ -470,8 +489,10 @@ class ONVIFDebugLogger:
         try:
             tree = ETfromString(msg)
         except ElementTree.ParseError:
-            logger.debug('ONVIF debug: stage={} malformed XML packet from {}'.format(
-                stage, ONVIFDebugLogger.format_src(src)))
+            logger.debug('{} stage={} malformed XML packet from {}'.format(
+                ONVIFDebugLogger.prefix(stage, 'malformed', None),
+                stage,
+                ONVIFDebugLogger.format_src(src)))
             return
 
         ONVIFDebugLogger.log_tree(stage, tree, src)
@@ -491,10 +512,13 @@ class ONVIFDebugLogger:
 
         values = [action, msg_id, relates_to] + types + scopes + xaddrs + endpoints
         detected = ONVIFDebugLogger.contains_onvif_marker(values)
+        sequence_key = relates_to or msg_id or action or stage
+        prefix = ONVIFDebugLogger.prefix(stage, 'detected' if detected else 'wsd', sequence_key)
         if detected:
             logger.debug(
-                'ONVIF debug: detected stage={} src={} action={} msg={} relates={} types={} scopes={} xaddrs={}'
+                '{} detected stage={} src={} action={} msg={} relates={} types={} scopes={} xaddrs={}'
                 .format(
+                    prefix,
                     stage,
                     ONVIFDebugLogger.format_src(src),
                     action or '-',
@@ -504,8 +528,75 @@ class ONVIFDebugLogger:
                     ONVIFDebugLogger.format_values(scopes),
                     ONVIFDebugLogger.format_values(xaddrs)))
         else:
-            logger.debug('ONVIF debug: no ONVIF markers stage={} src={} action={} msg={}'.format(
-                stage, ONVIFDebugLogger.format_src(src), action or '-', msg_id or '-'))
+            logger.debug('{} no ONVIF markers stage={} src={} action={} msg={}'.format(
+                prefix, stage, ONVIFDebugLogger.format_src(src), action or '-', msg_id or '-'))
+
+    @staticmethod
+    def prefix(stage: str, kind: str, sequence_key: Optional[str]) -> str:
+        label = ONVIFDebugLogger.stage_label(stage)
+        marker = 'ONVIF' if kind == 'detected' else 'WSD'
+        if kind == 'malformed':
+            marker = 'ERR'
+
+        seq = ONVIFDebugLogger.sequence_label(sequence_key)
+        text = '[{} {}{}]'.format(marker, label, ' ' + seq if seq else '')
+        if not ONVIFDebugLogger.color_enabled():
+            return text
+
+        label_color = ONVIFDebugLogger.COLOR_LABELS.get(label, ONVIFDebugLogger.COLOR_LABELS['WSD'])
+        if marker == 'ERR':
+            label_color = ONVIFDebugLogger.COLOR_LABELS['ERR']
+        elif marker == 'WSD':
+            label_color = ONVIFDebugLogger.COLOR_LABELS['WSD']
+
+        seq_color = ONVIFDebugLogger.sequence_color(sequence_key)
+        return '{}[{} {}{}]{}'.format(
+            label_color,
+            marker,
+            label,
+            '{} {}'.format(seq_color, seq) if seq and seq_color else ' ' + seq if seq else '',
+            ONVIFDebugLogger.COLOR_RESET)
+
+    @staticmethod
+    def color_enabled() -> bool:
+        mode = getattr(args, 'onvif_color', 'auto')
+        if mode == 'always':
+            return True
+        if mode == 'never' or os.environ.get('NO_COLOR') is not None:
+            return False
+
+        return sys.stderr.isatty()
+
+    @staticmethod
+    def stage_label(stage: str) -> str:
+        if stage.startswith('relay-local'):
+            return 'LOCAL'
+        if stage.startswith('relay-remote'):
+            return 'REMOTE'
+        if stage.startswith('relay-unicast-receive'):
+            return 'RX'
+        if stage.startswith('relay-unicast-forward'):
+            return 'TX'
+        if stage in ['socket-receive', 'wsd-handle-message']:
+            return 'LOCAL'
+
+        return 'WSD'
+
+    @staticmethod
+    def sequence_label(sequence_key: Optional[str]) -> str:
+        if not sequence_key:
+            return ''
+
+        digest = hashlib.sha1(sequence_key.encode('utf-8')).hexdigest()
+        return 'S{}'.format(int(digest[:2], 16) % len(ONVIFDebugLogger.SEQUENCE_COLORS))
+
+    @staticmethod
+    def sequence_color(sequence_key: Optional[str]) -> str:
+        if not sequence_key:
+            return ''
+
+        digest = hashlib.sha1(sequence_key.encode('utf-8')).hexdigest()
+        return ONVIFDebugLogger.SEQUENCE_COLORS[int(digest[:2], 16) % len(ONVIFDebugLogger.SEQUENCE_COLORS)]
 
     @staticmethod
     def collect_text(root: ElementTree.Element, local_name: str) -> List[str]:
@@ -2467,6 +2558,11 @@ def parse_args() -> None:
         '--onvif-debug',
         help='enable debug logging for ONVIF WS-Discovery detection and relay processing',
         action='store_true')
+    parser.add_argument(
+        '--onvif-color',
+        help='color ONVIF debug prefixes: auto, always, or never (default = auto)',
+        choices=['auto', 'always', 'never'],
+        default='auto')
     parser.add_argument(
         '-d', '--domain',
         help='set domain name (disables workgroup)',

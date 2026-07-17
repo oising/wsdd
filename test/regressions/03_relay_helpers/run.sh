@@ -14,7 +14,7 @@ spec = importlib.util.spec_from_file_location("wsdd", module_path)
 wsdd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wsdd)
 
-wsdd.args = argparse.Namespace(relay_ttl=4, onvif_debug=True)
+wsdd.args = argparse.Namespace(relay_ttl=4, onvif_debug=True, onvif_color="never")
 wsdd.logger = logging.getLogger("wsdd-test")
 
 relay = object.__new__(wsdd.WSDRelay)
@@ -88,4 +88,9 @@ types = wsdd.ONVIFDebugLogger.collect_text(tree, "Types")
 scopes = wsdd.ONVIFDebugLogger.collect_text(tree, "Scopes")
 assert wsdd.ONVIFDebugLogger.contains_onvif_marker(types + scopes)
 assert wsdd.ONVIFDebugLogger.enabled()
+assert wsdd.ONVIFDebugLogger.prefix("relay-local-multicast-capture", "detected", "urn:uuid:a").startswith(
+    "[ONVIF LOCAL S")
+assert wsdd.ONVIFDebugLogger.prefix("relay-remote-multicast-rebroadcast", "detected", "urn:uuid:a").startswith(
+    "[ONVIF REMOTE S")
+assert wsdd.ONVIFDebugLogger.prefix("relay-unicast-forward-multicast", "wsd", "urn:uuid:a").startswith("[WSD TX S")
 PY

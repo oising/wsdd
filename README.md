@@ -204,7 +204,14 @@ below for details.
      Enable DEBUG-level logging focused on ONVIF WS-Discovery detection and
      relay processing. This logs packet stages, source addresses, WSD actions,
      message IDs, ONVIF type/scope indicators, and `XAddrs` values without
-     requiring `-vv`.
+     requiring `-vv`. ONVIF debug lines use short colored prefixes when stderr
+     is a terminal.
+
+ * `--onvif-color auto|always|never`
+
+     Control color in `--onvif-debug` prefixes. The default is `auto`, which
+     colors prefixes only on terminals and honors the `NO_COLOR` environment
+     variable. Use `always` to force colors or `never` for plain logs.
 
  * `--relay-peer HOST[:PORT]`
 
@@ -542,7 +549,10 @@ needs it.
    machine itself as a WSD host.
  * Use `--onvif-debug` while testing to see ONVIF-specific detection and relay
    stages, including multicast capture, unicast forwarding, remote rebroadcast,
-   reply delivery, ONVIF type/scope markers, and `XAddrs` values.
+   reply delivery, ONVIF type/scope markers, and `XAddrs` values. Colored
+   prefixes show whether a packet is `LOCAL`, `REMOTE`, relay `TX`, or relay
+   `RX`; sequence labels such as `S2` help correlate related WS-Discovery
+   request/response messages.
  * Use `-v` or `-vv` for broader wsdd logging while testing relay activity.
  * Use the same `--relay-secret` on all peers that should exchange relay
    packets.

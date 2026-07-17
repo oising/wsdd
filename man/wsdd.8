@@ -65,7 +65,13 @@ to be allowed manually.
 Enable DEBUG-level logging focused on ONVIF WS-Discovery detection and relay
 processing. This logs packet stages, source addresses, WSD actions, message
 IDs, ONVIF type/scope indicators, and XAddrs values without requiring
-\fB\-vv\fR.
+\fB\-vv\fR. ONVIF debug lines use short colored prefixes when stderr is a
+terminal.
+.TP
+\fB\-\-onvif-color\ \fIauto|always|never\fR
+Control color in \fB\-\-onvif-debug\fR prefixes. The default is auto, which
+colors prefixes only on terminals and honors the NO_COLOR environment variable.
+Use always to force colors or never for plain logs.
 .TP
 \fB\-\-relay-peer\ \fIHOST[:PORT]\fR
 Forward local IPv4 WS-Discovery multicast packets to a remote wsdd relay peer
@@ -334,7 +340,9 @@ traffic; it only rewrites discovery addresses when instructed.
 Use \fB\-\-onvif-debug\fR while testing relay mode to log ONVIF-specific packet
 detection and relay stages, including multicast capture, unicast forwarding,
 remote rebroadcast, reply delivery, ONVIF type/scope markers, and XAddrs
-values.
+values. Colored prefixes show whether a packet is LOCAL, REMOTE, relay TX, or
+relay RX; sequence labels such as S2 help correlate related WS-Discovery
+request/response messages.
 .PP
 Use \fB\-\-ping\fR with \fB\-\-relay-peer\fR and \fB\-\-relay-secret\fR to verify
 that the remote relay process is reachable over unicast UDP and using the same
