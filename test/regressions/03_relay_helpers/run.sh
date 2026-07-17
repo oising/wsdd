@@ -31,6 +31,11 @@ decoded = relay.decode_envelope(encoded)
 assert decoded["type"] == "multicast"
 assert decoded["payload_b64"] == envelope["payload_b64"]
 
+large_payload = "<Envelope>" + ("<Scope>onvif://www.onvif.org/type/video_encoder</Scope>" * 100) + "</Envelope>"
+large_envelope = relay.build_envelope("multicast", large_payload, {})
+assert large_envelope["payload_encoding"] == "deflate"
+assert relay.decode_payload(large_envelope) == large_payload
+
 tampered = bytearray(encoded)
 tampered[-2] = ord("x")
 try:

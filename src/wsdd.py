@@ -22,6 +22,7 @@ import json
 import base64
 import hmac
 import hashlib
+import zlib
 import time
 import random
 import logging
@@ -1435,8 +1436,19 @@ class WSDRelay:
             return
 
         packet_type = str(envelope['type'])
-        payload = base64.b64decode(str(envelope['payload_b64'])).decode('utf-8')
+        try:
+            payload = self.decode_payload(envelope)
+        except ValueError as e:
+            logger.warning('invalid relay payload from {}:{}: {}'.format(raw_peer[0], raw_peer[1], e))
+            return
         source = envelope.get('source', {})
+        logger.debug('relay received {} packet from {}:{} wire_bytes={} payload_bytes={} encoding={}'.format(
+            packet_type,
+            raw_peer[0],
+            raw_peer[1],
+            len(packet),
+            len(payload.encode('utf-8')),
+            envelope.get('payload_encoding', 'plain')))
         if packet_type in ['multicast', 'reply']:
             ONVIFDebugLogger.log_packet('relay-unicast-receive-{}'.format(packet_type), payload, None)
 
@@ -1508,21 +1520,55 @@ class WSDRelay:
         packet = self.encode_envelope(envelope)
         for peer in peers:
             try:
+                logger.debug('relay sending {} packet to {}:{} wire_bytes={} payload_bytes={} encoding={}'.format(
+                    packet_type,
+                    peer[0],
+                    peer[1],
+                    len(packet),
+                    len(payload.encode('utf-8')),
+                    envelope.get('payload_encoding', 'plain')))
                 self.relay_socket.sendto(packet, peer)
             except Exception as e:
                 logger.error('error while sending relay packet to {}:{}: {}'.format(peer[0], peer[1], e))
 
     def build_envelope(self, packet_type: str, payload: str, source: RelaySource) -> RelayEnvelope:
-        return {
+        envelope = {
             'magic': self.RELAY_MAGIC,
             'version': self.RELAY_VERSION,
             'relay_id': self.relay_id,
             'packet_id': uuid.uuid4().hex,
             'type': packet_type,
             'ttl': args.relay_ttl,
-            'source': source,
-            'payload_b64': base64.b64encode(payload.encode('utf-8')).decode('ascii')
+            'source': source
         }
+        envelope.update(self.encode_payload(payload))
+        return envelope
+
+    @staticmethod
+    def encode_payload(payload: str) -> RelayEnvelope:
+        raw_payload = payload.encode('utf-8')
+        compressed_payload = zlib.compress(raw_payload)
+        if len(compressed_payload) < len(raw_payload):
+            return {
+                'payload_encoding': 'deflate',
+                'payload_b64': base64.b64encode(compressed_payload).decode('ascii')
+            }
+
+        return {
+            'payload_encoding': 'plain',
+            'payload_b64': base64.b64encode(raw_payload).decode('ascii')
+        }
+
+    @staticmethod
+    def decode_payload(envelope: RelayEnvelope) -> str:
+        payload = base64.b64decode(str(envelope['payload_b64']))
+        encoding = envelope.get('payload_encoding', 'plain')
+        if encoding == 'deflate':
+            payload = zlib.decompress(payload)
+        elif encoding != 'plain':
+            raise ValueError('unsupported payload encoding {}'.format(encoding))
+
+        return payload.decode('utf-8')
 
     def encode_envelope(self, envelope: RelayEnvelope) -> bytes:
         unsigned = dict(envelope)

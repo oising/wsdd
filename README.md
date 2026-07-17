@@ -597,6 +597,14 @@ is allowed between the two mesh IPs, the `--relay-secret` values match, and the
 peer address is the remote relay host's mesh IP rather than a camera LAN IP or
 published subnet address.
 
+If `--ping` succeeds and small packets such as `Resolve` traverse but larger
+ONVIF `Hello` or `Bye` messages do not appear on the peer, suspect UDP
+fragmentation or MTU handling in the mesh path. wsdd compresses relayed payloads
+when that reduces packet size, and DEBUG logging reports relay `wire_bytes`,
+`payload_bytes`, and payload `encoding` for sent and received relay packets.
+Use `--onvif-debug` or `-vv` on both relays to compare the camera-side `TX`
+line with the remote-side `RX` line.
+
 # Known Issues
 
 ## Security

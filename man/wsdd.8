@@ -349,6 +349,14 @@ Use \fB\-\-ping\fR with \fB\-\-relay-peer\fR and \fB\-\-relay-secret\fR to verif
 that the remote relay process is reachable over unicast UDP and using the same
 shared secret. The command sends one authenticated ping packet, waits for a
 pong response, reports success or timeout, and exits.
+.PP
+If \fB\-\-ping\fR succeeds and small packets such as Resolve traverse but larger
+ONVIF Hello or Bye messages do not appear on the peer, suspect UDP
+fragmentation or MTU handling in the mesh path. wsdd compresses relayed payloads
+when that reduces packet size, and DEBUG logging reports relay wire_bytes,
+payload_bytes, and payload encoding for sent and received relay packets. Use
+\fB\-\-onvif-debug\fR or \fB\-vv\fR on both relays to compare the camera-side TX
+line with the remote-side RX line.
 
 .SS Startup Status Output
 .PP
