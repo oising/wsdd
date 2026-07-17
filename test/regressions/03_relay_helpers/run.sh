@@ -40,6 +40,11 @@ except ValueError:
 else:
     raise AssertionError("tampered relay packet was accepted")
 
+pong = relay.build_envelope("pong", "pong", {"request_packet_id": envelope["packet_id"]})
+decoded_pong = relay.decode_envelope(relay.encode_envelope(pong))
+assert decoded_pong["type"] == "pong"
+assert decoded_pong["source"]["request_packet_id"] == envelope["packet_id"]
+
 xml = """<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope
   xmlns:soap="http://www.w3.org/2003/05/soap-envelope"

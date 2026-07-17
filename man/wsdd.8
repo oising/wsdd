@@ -90,6 +90,14 @@ the other side of the mesh need to connect through a routed or proxied address.
 The option can be specified multiple times and only rewrites URL values that
 start with FROM.
 .TP
+\fB\-\-ping\fR
+Send a one-shot authenticated relay ping to each \fB\-\-relay-peer\fR and exit.
+This verifies that unicast UDP can reach the remote relay process and that both
+sides use the same \fB\-\-relay-secret\fR.
+.TP
+\fB\-\-ping-timeout\ \fITIMEOUT\fR
+Seconds to wait for each \fB\-\-ping\fR response. The default is 3.0.
+.TP
 \fB\-s\fR, \fB\-\-shortlog\fR
 Use a shorter logging format that only includes the level and message.
 This is useful in cases where the logging mechanism, like systemd on Linux,
@@ -327,6 +335,11 @@ Use \fB\-\-onvif-debug\fR while testing relay mode to log ONVIF-specific packet
 detection and relay stages, including multicast capture, unicast forwarding,
 remote rebroadcast, reply delivery, ONVIF type/scope markers, and XAddrs
 values.
+.PP
+Use \fB\-\-ping\fR with \fB\-\-relay-peer\fR and \fB\-\-relay-secret\fR to verify
+that the remote relay process is reachable over unicast UDP and using the same
+shared secret. The command sends one authenticated ping packet, waits for a
+pong response, reports success or timeout, and exits.
 
 .SS Startup Status Output
 .PP

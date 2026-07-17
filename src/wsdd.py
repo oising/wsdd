@@ -1337,8 +1337,22 @@ class WSDRelay:
             self.handle_remote_multicast(payload, raw_peer, source)
         elif packet_type == 'reply':
             self.handle_remote_reply(payload, source)
+        elif packet_type == 'ping':
+            self.handle_relay_ping(envelope, raw_peer)
+        elif packet_type == 'pong':
+            logger.debug('ignoring unsolicited relay pong from {}'.format(raw_peer))
         else:
             logger.warning('unknown relay packet type {}'.format(packet_type))
+
+    def handle_relay_ping(self, envelope: RelayEnvelope, raw_peer: Tuple[str, int]) -> None:
+        packet_id = str(envelope['packet_id'])
+        logger.info('relay ping received from {}:{} ({})'.format(raw_peer[0], raw_peer[1], packet_id))
+        status_notice('relay ping received from {}:{}'.format(raw_peer[0], raw_peer[1]))
+        reply = self.build_envelope('pong', 'pong', {'request_packet_id': packet_id})
+        try:
+            self.relay_socket.sendto(self.encode_envelope(reply), raw_peer)
+        except Exception as e:
+            logger.error('error while sending relay pong to {}:{}: {}'.format(raw_peer[0], raw_peer[1], e))
 
     def handle_remote_multicast(self, payload: str, raw_peer: Tuple[str, int], source: RelaySource) -> None:
         msg_id = self.extract_message_id(payload)
@@ -2544,6 +2558,15 @@ def parse_args() -> None:
         '--relay-xaddr-map',
         help='rewrite relayed WS-Discovery XAddrs from FROM to TO using FROM=TO',
         action='append', default=[])
+    parser.add_argument(
+        '--ping',
+        help='send a one-shot authenticated relay ping to --relay-peer and exit',
+        action='store_true')
+    parser.add_argument(
+        '--ping-timeout',
+        help='seconds to wait for each relay ping response (default = 3.0)',
+        type=float,
+        default=3.0)
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -2572,14 +2595,26 @@ def parse_args() -> None:
     logging.basicConfig(level=log_level, format=fmt)
     logger = logging.getLogger('wsdd')
 
-    if not args.interface:
+    if not args.interface and not args.ping:
         logger.warning('no interface given, using all interfaces')
 
-    if args.relay_peer and not args.ipv4only:
+    if args.relay_peer and not args.ipv4only and not args.ping:
         logger.warning('relay mode currently supports IPv4 WS-Discovery only; consider using -4/--ipv4only')
 
     if args.relay_ttl < 1:
         logger.error('relay TTL must be at least 1')
+        sys.exit(1)
+
+    if args.ping and not args.relay_peer:
+        logger.error('--ping requires at least one --relay-peer')
+        sys.exit(1)
+
+    if args.ping and not args.relay_secret:
+        logger.error('--ping requires --relay-secret')
+        sys.exit(1)
+
+    if args.ping_timeout <= 0:
+        logger.error('--ping-timeout must be greater than zero')
         sys.exit(1)
 
     if not args.uuid:
@@ -2705,6 +2740,64 @@ def emit_startup_summary() -> None:
         status_notice("networking is inactive until the API 'start' command is received")
 
 
+def run_relay_ping() -> int:
+    relay = object.__new__(WSDRelay)
+    relay.secret = args.relay_secret.encode('utf-8')
+    relay.relay_id = uuid.uuid4().hex
+
+    peers = WSDRelay.parse_peers(args.relay_peer)
+    failures = 0
+    for peer in peers:
+        packet_id = uuid.uuid4().hex
+        envelope = {
+            'magic': WSDRelay.RELAY_MAGIC,
+            'version': WSDRelay.RELAY_VERSION,
+            'relay_id': relay.relay_id,
+            'packet_id': packet_id,
+            'type': 'ping',
+            'ttl': 1,
+            'source': {},
+            'payload_b64': base64.b64encode(b'ping').decode('ascii')
+        }
+
+        packet = relay.encode_envelope(envelope)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(args.ping_timeout)
+        status_notice('pinging relay {}:{} timeout={}s'.format(peer[0], peer[1], args.ping_timeout))
+        try:
+            start = time.time()
+            sock.sendto(packet, peer)
+            while True:
+                reply, raw_peer = sock.recvfrom(WSD_MAX_LEN * 2)
+                try:
+                    reply_envelope = relay.decode_envelope(reply)
+                except ValueError as e:
+                    status_notice('ignoring invalid relay ping reply from {}:{} ({})'.format(
+                        raw_peer[0], raw_peer[1], e))
+                    continue
+
+                source = reply_envelope.get('source', {})
+                if (reply_envelope.get('type') == 'pong'
+                        and isinstance(source, dict)
+                        and source.get('request_packet_id') == packet_id):
+                    elapsed = int((time.time() - start) * 1000)
+                    status_notice('relay {}:{} reachable in {} ms'.format(raw_peer[0], raw_peer[1], elapsed))
+                    break
+
+                status_notice('ignoring unexpected relay packet type={} from {}:{}'.format(
+                    reply_envelope.get('type'), raw_peer[0], raw_peer[1]))
+        except socket.timeout:
+            status_notice('relay {}:{} did not respond'.format(peer[0], peer[1]))
+            failures += 1
+        except Exception as e:
+            status_notice('relay {}:{} ping failed: {}'.format(peer[0], peer[1], e))
+            failures += 1
+        finally:
+            sock.close()
+
+    return 0 if failures == 0 else 1
+
+
 def main() -> int:
     global logger, args  # noqa: F824
 
@@ -2713,6 +2806,9 @@ def main() -> int:
     if args.ipv4only and args.ipv6only:
         logger.error('Listening to no IP address family.')
         return 4
+
+    if args.ping:
+        return run_relay_ping()
 
     aio_loop = asyncio.new_event_loop()
     emit_startup_summary()

@@ -235,6 +235,16 @@ below for details.
      or proxied address. The option can be specified multiple times and only
      rewrites URL values that start with `FROM`.
 
+ * `--ping`
+
+     Send a one-shot authenticated relay ping to each `--relay-peer` and exit.
+     This verifies that unicast UDP can reach the remote relay process and that
+     both sides use the same `--relay-secret`.
+
+ * `--ping-timeout TIMEOUT`
+
+     Seconds to wait for each `--ping` response. The default is `3.0`.
+
  * `-s`, `--shortlog`
 
      Use a shorter logging format that only includes the level and message.
@@ -538,6 +548,43 @@ needs it.
    packets.
  * Confirm that normal unicast connectivity to the final ONVIF/HTTP/RTSP
    service works after discovery. Relay mode only moves discovery packets.
+
+### Verifying relay connectivity
+
+Use `--ping` when one relay appears to be forwarding but the other side does
+not show received packets. The command sends a signed relay `ping` packet to
+the peer and waits for a signed `pong` from the running remote relay.
+
+Run this from the OpenVPN/camera-side host to verify the Cloudflare mesh relay:
+
+```
+camera-side$ python3 ./wsdd.py \
+  --ping \
+  --relay-peer 100.96.0.22:3703 \
+  --relay-secret 'shared-secret'
+```
+
+Expected success output:
+
+```
+wsdd: pinging relay 100.96.0.22:3703 timeout=3.0s
+wsdd: relay 100.96.0.22:3703 reachable in 12 ms
+```
+
+Run the reciprocal check from the remote relay by pointing `--relay-peer` at
+the camera-side host's Cloudflare mesh IP:
+
+```
+remote-side$ python3 ./wsdd.py \
+  --ping \
+  --relay-peer <CAMERA_SIDE_MESH_IP>:3703 \
+  --relay-secret 'shared-secret'
+```
+
+If the ping times out, check that the remote wsdd relay is running, UDP `3703`
+is allowed between the two mesh IPs, the `--relay-secret` values match, and the
+peer address is the remote relay host's mesh IP rather than a camera LAN IP or
+published subnet address.
 
 # Known Issues
 
